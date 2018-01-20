@@ -108,7 +108,7 @@ function eventKeyDown(e) {
   keyDown(keycode);
 }
 
-function NPGinit(FPS){
+function NPGinit(FPS, callback){
   //takes frames per secont to run at
   
   canvas = document.getElementById('NPGcanvas');
@@ -122,13 +122,12 @@ function NPGinit(FPS){
   //to the document. Here we do the latter
   document.addEventListener('keyup', eventKeyUp, true);
   document.addEventListener('keydown', eventKeyDown, true);
-  
   setInterval(NPGtick, 1000/FPS);
   
   myinit();
 }
 
 function NPGtick() {
-    update();
-    draw();
+  let fake_data = update();
+  draw(fake_data);
 }

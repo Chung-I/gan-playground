@@ -24,46 +24,44 @@
 var data, labels, N;
 var ss = 50.0; // scale for drawing
 
-// discriminator
-var dis_layer_defs, discriminator, disTrainer, gen_layer_defs, generator, genTrainer;
+// net
+var dis_layer_defs, net, GANTrainer, gen_layer_defs;
 var t = "\n\
-dis_layer_defs = [];\n\
-dis_layer_defs.push({type:'input', out_sx:1, out_sy:1, out_depth:2});\n\
-dis_layer_defs.push({type:'fc', num_neurons:6});\n\
-dis_layer_defs.push({type:'fc', num_neurons:2, activation: 'tanh'});\n\
-dis_layer_defs.push({type:'softmax', num_classes:2});\n\
-\n\
-discriminator = new convnetjs.Net();\n\
-discriminator.makeLayers(dis_layer_defs);\n\
-\n\
-disTrainer = new convnetjs.SGDTrainer(discriminator, {learning_rate:0.01, momentum:0.1, batch_size:10, l2_decay:0.001});\n\
-\n\
 gen_layer_defs = [];\n\
 gen_layer_defs.push({type:'input', out_sx:1, out_sy:1, out_depth:2});\n\
-gen_layer_defs.push({type:'fc', num_neurons:6, activation: 'tanh'});\n\
-gen_layer_defs.push({type:'fc', num_neurons:2, activation: 'tanh'});\n\
+gen_layer_defs.push({type:'fc', num_neurons:4, activation: 'tanh'});\n\
+gen_layer_defs.push({type:'fc', num_neurons:4, activation: 'tanh'});\n\
+gen_layer_defs.push({type:'fc', num_neurons:4, activation: 'tanh'});\n\
 gen_layer_defs.push({type:'fc', num_neurons:2});\n\
-gen_layer_defs.push({type:'softmax', num_classes:2});\n\
+dis_layer_defs = [];\n\
+dis_layer_defs.push({type:'input', out_sx:1, out_sy:1, out_depth:2});\n\
+dis_layer_defs.push({type:'fc', num_neurons:4, activation: 'tanh'});\n\
+dis_layer_defs.push({type:'fc', num_neurons:4, activation: 'tanh'});\n\
+dis_layer_defs.push({type:'fc', num_neurons:4, activation: 'tanh'});\n\
+dis_layer_defs.push({type:'fc', num_neurons:4, activation: 'tanh'});\n\
+dis_layer_defs.push({type:'softmax', num_classes:2});\n\
 \n\
-generator = new convnetjs.Net();\n\
-generator.makeLayers(gen_layer_defs);\n\
+net = new convnetjs.GAN();\n\
+net.makeLayers(gen_layer_defs, dis_layer_defs);\n\
 \n\
-genTrainer = new convnetjs.SGDTrainer(generator, {learning_rate:0.01, momentum:0.1, batch_size:10, l2_decay:0.001});\n\
+GANTrainer = new convnetjs.GANTrainer(net, {learning_rate:0.01, method:'adadelta', batch_size:10, l2_decay:0.001});\n\
+\n\
 \n\
 ";
 
+
 function reload() {
   eval($("#layerdef").val());
-
+  
   // enter buttons for layers
   var t = '';
-  for(var i=1;i<discriminator.layers.length-1;i++) { // ignore input and regression layers (first and last)
+  for(var i=1;i<net.layers.length-1;i++) { // ignore input and regression layers (first and last)
     var butid = "button" + i;
-    t += "<input id=\""+butid+"\" value=\"" + discriminator.layers[i].layer_type + "(" + discriminator.layers[i].out_depth + ")" +"\" type=\"submit\" onclick=\"updateLix("+i+")\" style=\"width:80px; height: 30px; margin:5px;\";>";
+    t += "<input id=\""+butid+"\" value=\"" + net.layers[i].layer_type + "(" + net.layers[i].out_depth + ")" +"\" type=\"submit\" onclick=\"updateLix("+i+")\" style=\"width:80px; height: 30px; margin:5px;\";>";
   }
   $("#layer_ixes").html(t);
   $("#button"+lix).css('background-color', '#FFA');
-  $("#cyclestatus").html('drawing neurons ' + d0 + ' and ' + d1 + ' of layer with index ' + lix + ' (' + discriminator.layers[lix].layer_type + ')');
+  $("#cyclestatus").html('drawing neurons ' + d0 + ' and ' + d1 + ' of layer with index ' + lix + ' (' + net.layers[lix].layer_type + ')');
 }
 function updateLix(newlix) {
   $("#button"+lix).css('background-color', ''); // erase highlight
@@ -72,44 +70,48 @@ function updateLix(newlix) {
   d1 = 1; // reset these
   $("#button"+lix).css('background-color', '#FFA');
 
-  $("#cyclestatus").html('drawing neurons ' + d0 + ' and ' + d1 + ' of layer with index ' + lix + ' (' + discriminator.layers[lix].layer_type + ')');
+  $("#cyclestatus").html('drawing neurons ' + d0 + ' and ' + d1 + ' of layer with index ' + lix + ' (' + net.layers[lix].layer_type + ')');
 }
  
 
 function myinit() { }
 
 function random_data(){
-  data = [];
-  labels = [];
+  let data = [];
+  let labels = [];
   for(var k=0;k<40;k++) {
-    data.push([convnetjs.randf(-3,3), convnetjs.randf(-3,3)]); labels.push(convnetjs.randf(0,1) > 0.5 ? 1 : 0);
+    data.push([convnetjs.randf(-3,3), convnetjs.randf(-3,3)]);
+    //labels.push(convnetjs.randf(0,1) > 0.5 ? 1 : 0);
+    labels.push(1);
   }
   N = labels.length;
+  return [data, labels];  
 }
 
 function original_data(){
   
-  data = [];
-  labels = [];
+  let data = [];
+  let labels = [];
   data.push([-0.4326  ,  1.1909 ]); labels.push(1);
   data.push([3.0, 4.0]); labels.push(1);
   data.push([0.1253 , -0.0376   ]); labels.push(1);
   data.push([0.2877 ,   0.3273  ]); labels.push(1);
   data.push([-1.1465 ,   0.1746 ]); labels.push(1);
-  data.push([1.8133 ,   1.0139  ]); labels.push(0);
-  data.push([2.7258 ,   1.0668  ]); labels.push(0);
-  data.push([1.4117 ,   0.5593  ]); labels.push(0);
-  data.push([4.1832 ,   0.3044  ]); labels.push(0);
-  data.push([1.8636 ,   0.1677  ]); labels.push(0);
+  data.push([1.8133 ,   1.0139  ]); labels.push(1);
+  data.push([2.7258 ,   1.0668  ]); labels.push(1);
+  data.push([1.4117 ,   0.5593  ]); labels.push(1);
+  data.push([4.1832 ,   0.3044  ]); labels.push(1);
+  data.push([1.8636 ,   0.1677  ]); labels.push(1);
   data.push([0.5 ,   3.2  ]); labels.push(1);
   data.push([0.8 ,   3.2  ]); labels.push(1);
   data.push([1.0 ,   -2.2  ]); labels.push(1);
   N = labels.length;
+  return [data, labels];
 }
 
 function circle_data() {
-  data = [];
-  labels = [];
+  let data = [];
+  let labels = [];
   for(var i=0;i<50;i++) {
     var r = convnetjs.randf(0.0, 2.0);
     var t = convnetjs.randf(0.0, 2*Math.PI);
@@ -119,46 +121,64 @@ function circle_data() {
   for(var i=0;i<50;i++) {
     var r = convnetjs.randf(3.0, 5.0);
     //var t = convnetjs.randf(0.0, 2*Math.PI);
-    var t = 2*Math.PI*i/50.0
+    var t = 2*Math.PI*i/50.0;
     data.push([r*Math.sin(t), r*Math.cos(t)]);
     labels.push(1);
   }
   N = data.length;
+  return [data, labels];
 }
 
-function spiral_data() {
-  data = [];
-  labels = [];
+function spiral_data(e) {
+  console.log(e);
+  let data = [];
+  let labels = [];
   var n = 100;
+  let eps = 0.3;
   for(var i=0;i<n;i++) {
-    var r = i/n*5 + convnetjs.randf(-0.1, 0.1);
-    var t = 1.25*i/n*2*Math.PI + convnetjs.randf(-0.1, 0.1);
+    var r = i/n*5 + convnetjs.randf(-eps, eps);
+    var t = 1.25*i/n*2*Math.PI + convnetjs.randf(-eps, eps);
     data.push([r*Math.sin(t), r*Math.cos(t)]);
     labels.push(1);
   }
   for(var i=0;i<n;i++) {
-    var r = i/n*5 + convnetjs.randf(-0.1, 0.1);
-    var t = 1.25*i/n*2*Math.PI + Math.PI + convnetjs.randf(-0.1, 0.1);
+    var r = i/n*5 + convnetjs.randf(-eps, eps);
+    var t = 1.25*i/n*2*Math.PI + Math.PI + convnetjs.randf(-eps, eps);
     data.push([r*Math.sin(t), r*Math.cos(t)]);
     labels.push(1);
   }
   N = data.length;
+  return [data, labels];
 }
 
 function gaussian_data() {
-  noises = [];
-  fake_labels = [];
-  for(var i=0;i<100;i++) {
-    var x = convnetjs.randn(0.0, 1.0);
-    var y = convnetjs.randn(0.0, 1.0);
+  let noises = [];
+  for(let i=0;i<100;i++) {
+    let x = convnetjs.randn(0.0, 5.0);
+    let y = convnetjs.randn(0.0, 5.0);
     noises.push([x, y]);
-    fake_labels.push(0);
   }
   fake_N = noises.length;
+  return noises;
+}
+
+function normal_data() {
+  let data = [];
+  let labels = [];
+  var n = 100;
+  let eps = 1;
+  for(var i=0;i<n;i++) {
+    var r = convnetjs.randf(-eps, eps);
+    var t = 1.25*i/n*2*Math.PI + convnetjs.randf(-eps, eps);
+    data.push([r*Math.sin(t), r*Math.cos(t)]);
+    labels.push(1);
+  }
+  N = data.length;
+  return [data, labels];
 }
 
 function shuffle(array) {
-  var currentIndex = array.length, temporaryValue, randomIndex;
+  let currentIndex = array.length, temporaryValue, randomIndex;
 
   // While there remain elements to shuffle...
   while (0 !== currentIndex) {
@@ -176,68 +196,115 @@ function shuffle(array) {
   return array;
 }
 
-function gen(generator, is_training) {
-  var x = new convnetjs.Vol(1,1,2);
-  fake_data = [];
-  for(var ix=0;ix<fake_N;ix++) {
+function gen(is_training) {
+  let x = new convnetjs.Vol(1,1,2);
+  let fake_data = [];
+  noises = gaussian_data();
+  for(let ix=0;ix<fake_N;ix++) {
     x.w = noises[ix];
-    var fake_pt = generator.forward(x, is_training);
-    fake_data.push(fake_pt);
+    fake_pt = net.forward(x, is_training, 'gen');
+    fake_data.push([fake_pt.w[0], fake_pt.w[1]]);
   }
-  return fake_data;
+  let fake_labels = fake_data.map(() => 0);
+  return [fake_data, fake_labels];
 }
-function concat_shuffle(data, labels, fake_data, fake_labels) {
-  data = data.concat(fake_data);
-  labels = labels.concat(fake_labels);
-  N = data.length;  
-  data_labels = data.map((item, i) => [item, labels[i]]);
-  shuffle(data_labels);
-  data = data_labels.map(item => item[0]);
-  labels = data_labels.map(item => item[1]);
-  return data, labels;
+
+function concat_shuffle(_data, _labels, _fake_data, _fake_labels) {
+  _data = _data.concat(_fake_data);
+  _labels = _labels.concat(_fake_labels);
+  N = _data.length;  
+  _data_labels = _data.map((item, i) => [item, _labels[i]]);
+  shuffle(_data_labels);
+  _data = _data_labels.map(item => item[0]);
+  _labels = _data_labels.map(item => item[1]);
+  return [_data, _labels];
 }
+
+function onClickDataset(el) {
+  switch (el.value) {
+    case 'simple data':
+      [data, labels] = original_data();
+      break;
+    case 'circle data':
+      [data, labels] = circle_data();
+      break;
+    case 'spiral data':
+      [data, labels] = spiral_data();
+      break;
+    case 'random data':
+      [data, labels] = random_data();
+      break;
+    case 'normal data':
+      [data, labels] = normal_data();
+      break;
+  }
+}
+
+[data, labels] = spiral_data();
+
 function update(){
   // forward prop the data
-  var start = new Date().getTime();  
-  for(var iters=0;iters<20;iters++) {  
-    fake_data = gen(generator, false);
-    data, labels = concat_shuffle(data, labels, fake_data, fake_labels);
-    //x.w = data[ix];
-    var avloss = 0.0;
-    for(var ix=0;ix<N;ix++) {
-      x.w = data[ix];
-      var stats = disTrainer.train(x, labels[ix]);
-      avloss += stats.loss;
+  let start = new Date().getTime();
+  let x = new convnetjs.Vol(1,1,2);
+  let stats;
+  let fake_data, fake_labels;
+  let genloss = 0.0; 
+  let avloss = 0.0; 
+  let lastIters;  
+  for(let iters=0;iters<2;iters++) {  
+    for (let disiter=0; disiter<3; disiter++) {
+      [fake_data, fake_labels] = gen(false);
+      [dis_data, dis_labels] = concat_shuffle(data, labels, fake_data, fake_labels);
+      //x.w = data[ix];
+      for(let ix=0;ix<N;ix++) {
+        x.w = dis_data[ix];
+        stats = GANTrainer.train_dis(x, dis_labels[ix]);
+        avloss += stats.loss;
+      }
     }
-    fake_data = gen(generator, true);
+    for (let geniter=0; geniter < 1; geniter++) {
+      [fake_data, fake_labels] = gen(false);    
+      for(let ix=0;ix<fake_data.length;ix++) {
+        if (ix === 9) {
+          let qq = 1;
+        }
+        x.w = fake_data[ix];
+        stats = GANTrainer.train_gen(x, fake_labels[ix]);
+        genloss += stats.loss;
+      }
+    }
+    lastIters = iters;
   }
-  avloss /= N*iters;
+  avloss /= N*lastIters;
+  genloss /= N*lastIters;  
 
-  var end = new Date().getTime();
-  var time = end - start;
+  let end = new Date().getTime();
+  let time = end - start;
       
-  //console.log('loss = ' + avloss + ', 100 cycles through data in ' + time + 'ms');
+  //console.log('dis loss = ' + avloss + ', 100 cycles through data in ' + time + 'ms');
+  //console.log('gen loss = ' + genloss + ', 100 cycles through data in ' + time + 'ms');
+  return fake_data;
 }
 
 function cycle() {
-  var selected_layer = discriminator.layers[lix];
+  var selected_layer = net.layers[lix];
   d0 += 1;
   d1 += 1;
   if(d1 >= selected_layer.out_depth) d1 = 0; // and wrap
   if(d0 >= selected_layer.out_depth) d0 = 0; // and wrap
-  $("#cyclestatus").html('drawing neurons ' + d0 + ' and ' + d1 + ' of layer #' + lix + ' (' + discriminator.layers[lix].layer_type + ')');
+  $("#cyclestatus").html('drawing neurons ' + d0 + ' and ' + d1 + ' of layer #' + lix + ' (' + net.layers[lix].layer_type + ')');
 }
 
 var lix = 4; // layer id to track first 2 neurons of
 var d0 = 0; // first dimension to show visualized
 var d1 = 1; // second dimension to show visualized
-function draw(){
+function draw(fake_data){
     
     ctx.clearRect(0,0,WIDTH,HEIGHT);
     
     var netx = new convnetjs.Vol(1,1,2);
     // draw decisions in the grid
-    var density= 4.0;
+    var density= 10.0;
     var gridstep = 2;
     var gridx = [];
     var gridy = [];
@@ -247,8 +314,7 @@ function draw(){
         //var dec= svm.marginOne([(x-WIDTH/2)/ss, (y-HEIGHT/2)/ss]);
         netx.w[0] = (x-WIDTH/2)/ss;
         netx.w[1] = (y-HEIGHT/2)/ss;
-        var a = discriminator.forward(netx, false);
-        
+        var a = net.forward(netx, false, 'dis');
         if(a.w[0] > a.w[1]) ctx.fillStyle = 'rgb(250, 150, 150)';
         else ctx.fillStyle = 'rgb(150, 250, 150)';
 
@@ -256,14 +322,14 @@ function draw(){
         //ctx.fillStyle = 'rgb(' + Math.floor(a.w[0]*255) + ',' + Math.floor(a.w[1]*255) + ', 0)';
         ctx.fillRect(x-density/2-1, y-density/2-1, density+2, density+2);
 
-        if(cx%gridstep === 0 && cy%gridstep===0) {
+        /*if(cx%gridstep === 0 && cy%gridstep===0) {
           // record the transformation information
-          var xt = discriminator.layers[lix].out_act.w[d0]; // in screen coords
-          var yt = discriminator.layers[lix].out_act.w[d1]; // in screen coords
+          var xt = net.layers[lix].out_act.w[d0]; // in screen coords
+          var yt = net.layers[lix].out_act.w[d1]; // in screen coords
           gridx.push(xt);
           gridy.push(yt);
           gridl.push(a.w[0] > a.w[1]); // remember final label as well
-        }
+        }*/
       }
     }
 
@@ -328,27 +394,28 @@ function draw(){
     // draw datapoints.
     ctx.strokeStyle = 'rgb(0,0,0)';
     ctx.lineWidth = 1;
-    N = data.length;    
+    let draw_data = data.concat(fake_data);
+    N = draw_data.length;    
     for(var i=0;i<N;i++) {
       
       if(labels[i]==1) ctx.fillStyle = 'rgb(100,200,100)';
       else ctx.fillStyle = 'rgb(200,100,100)';
       
-      drawCircle(data[i][0]*ss+WIDTH/2, data[i][1]*ss+HEIGHT/2, 5.0);
+      drawCircle(draw_data[i][0]*ss+WIDTH/2, draw_data[i][1]*ss+HEIGHT/2, 5.0);
 
-      // also draw transformed data points while we're at it
-      netx.w[0] = data[i][0];
-      netx.w[1] = data[i][1]
-      var a = discriminator.forward(netx, false);
-      var xt = visWIDTH * (discriminator.layers[lix].out_act.w[d0] - mmx.minv) / mmx.dv; // in screen coords
-      var yt = visHEIGHT * (discriminator.layers[lix].out_act.w[d1] - mmy.minv) / mmy.dv; // in screen coords
+      // also draw transformed draw_data points while we're at it
+      /*netx.w[0] = draw_data[i][0];
+      netx.w[1] = draw_data[i][1]
+      //var a = net.forward(netx, false);
+      var xt = visWIDTH * (net.layers[lix].out_act.w[d0] - mmx.minv) / mmx.dv; // in screen coords
+      var yt = visHEIGHT * (net.layers[lix].out_act.w[d1] - mmy.minv) / mmy.dv; // in screen coords
       if(labels[i]==1) visctx.fillStyle = 'rgb(100,200,100)';
       else visctx.fillStyle = 'rgb(200,100,100)';
       visctx.beginPath();
       visctx.arc(xt, yt, 5.0, 0, Math.PI*2, true); 
       visctx.closePath();
       visctx.stroke();
-      visctx.fill();
+      visctx.fill();*/
     }
 }
 
@@ -400,7 +467,7 @@ $(function() {
     visWIDTH = viscanvas.width;
     visHEIGHT = viscanvas.height;
 
-    circle_data();
+    //circle_data();
     $("#layerdef").val(t);
     reload();
     NPGinit(20);
@@ -455,10 +522,11 @@ input[type="submit"]
 <div class="panes">
 <div class="pane">
 <canvas id="NPGcanvas" width="400" height="400">Browser not supported for Canvas. Get a real browser.</canvas>
-<input id="buttondata1" type="submit" value="simple data" onclick="original_data();" style="width: 100px; height: 30px;">
-<input id="buttondata2" type="submit" value="circle data" onclick="circle_data();" style="width: 100px; height: 30px;">
-<input id="buttondata3" type="submit" value="spiral data" onclick="spiral_data();" style="width: 100px; height: 30px;"><br>
-<input id="buttondata4" type="submit" value="random data" onclick="random_data();" style="width: 100px; height: 30px;"><br>
+<input id="buttondata1" type="submit" value="simple data" onclick="onClickDataset(this);" style="width: 100px; height: 30px;">
+<input id="buttondata2" type="submit" value="circle data" onclick="onClickDataset(this);" style="width: 100px; height: 30px;">
+<input id="buttondata3" type="submit" value="spiral data" onclick="onClickDataset(this);" style="width: 100px; height: 30px;">
+<input id="buttondata4" type="submit" value="random data" onclick="onClickDataset(this);" style="width: 100px; height: 30px;">
+<input id="buttondata5" type="submit" value="normal data" onclick="onClickDataset(this);" style="width: 100px; height: 30px;">
 <p>
 Controls:<br>
 <b>CLICK</b>: Add red data point<br>

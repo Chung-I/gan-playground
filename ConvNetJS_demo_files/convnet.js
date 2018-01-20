@@ -484,6 +484,12 @@ var convnetjs = convnetjs || { REVISION: 'ALPHA' };
       response.push({params: this.biases.w, grads: this.biases.dw, l1_decay_mul: 0.0, l2_decay_mul: 0.0});
       return response;
     },
+    zero_grad: function() {
+      for(var i=0;i<this.out_depth;i++) {
+        this.filters[i].dw = 0;
+      }
+      this.biases.dw = 0;
+    },
     toJSON: function() {
       var json = {};
       json.sx = this.sx; // filter size in x, y dims
@@ -590,6 +596,16 @@ var convnetjs = convnetjs || { REVISION: 'ALPHA' };
       }
       response.push({params: this.biases.w, grads: this.biases.dw, l1_decay_mul: 0.0, l2_decay_mul: 0.0});
       return response;
+    },
+    zero_grad: function() {
+      for(let i=0;i<this.out_depth ;i++) {
+        for (let j=0; j<this.filters[i].dw.length; j++) {
+          this.filters[i].dw[j] = 0.0;
+        }
+      }
+      for (let j=0; j<this.biases.dw.length; j++) {
+        this.biases.dw[j] = 0.0;
+      }
     },
     toJSON: function() {
       var json = {};
@@ -859,7 +875,7 @@ var convnetjs = convnetjs || { REVISION: 'ALPHA' };
       this.out_act = A;
       return this.out_act;
     },
-    backward: function(y) {
+    backward: function(y, neg=false) {
 
       // compute and accumulate gradient wrt weights and bias of this layer
       var x = this.in_act;
@@ -868,11 +884,18 @@ var convnetjs = convnetjs || { REVISION: 'ALPHA' };
       for(var i=0;i<this.out_depth;i++) {
         var indicator = i === y ? 1.0 : 0.0;
         var mul = -(indicator - this.es[i]);
+        if(neg) {
+          mul = indicator ? this.es[i] : this.es[i] - 1;
+        }
         x.dw[i] = mul;
       }
 
       // loss is the class negative log likelihood
-      return -Math.log(this.es[y]);
+      if (neg) {
+        return Math.log(this.es[y]);
+      } else {
+        return -Math.log(this.es[y]);        
+      }
     },
     getParamsAndGrads: function() { 
       return [];
@@ -1656,6 +1679,15 @@ var convnetjs = convnetjs || { REVISION: 'ALPHA' };
       }
       return response;
     },
+    zero_grad: function() {
+      // accumulate parameters and gradients for the entire network
+      for(var i=0;i<this.layers.length;i++) {
+        let fn = this.layers[i].zero_grad;
+        if (fn !== undefined) {
+          this.layers[i].zero_grad();
+        }
+      }
+    },
     getPrediction: function() {
       // this is a convenience function for returning the argmax
       // prediction, assuming the last layer of the net is a softmax
@@ -1702,7 +1734,242 @@ var convnetjs = convnetjs || { REVISION: 'ALPHA' };
       }
     }
   }
-  
+
+  var GAN = function(options) {
+    this.gen_layers = [];
+    this.dis_layers = [];
+    this.layers = [];
+  }
+
+  GAN.prototype = {
+    
+    // takes a list of layer definitions and creates the network layer objects
+    makeLayers: function(gen_defs, dis_defs) {
+
+      // few checks
+      //assert(gen_defs.length >= 2, 'Error! At least one input layer and one loss layer are required.');
+      //assert(defs[0].type === 'input', 'Error! First layer must be the input layer, to declare size of inputs');
+
+      // desugar layer_defs for adding activation, dropout layers etc
+      var desugar = function(defs) {
+        var new_defs = [];
+        for(var i=0;i<defs.length;i++) {
+          var def = defs[i];
+          
+          if(def.type==='softmax' || def.type==='svm') {
+            // add an fc layer here, there is no reason the user should
+            // have to worry about this and we almost always want to
+            new_defs.push({type:'fc', num_neurons: def.num_classes});
+          }
+
+          if(def.type==='regression') {
+            // add an fc layer here, there is no reason the user should
+            // have to worry about this and we almost always want to
+            new_defs.push({type:'fc', num_neurons: def.num_neurons});
+          }
+
+          if((def.type==='fc' || def.type==='conv') 
+              && typeof(def.bias_pref) === 'undefined'){
+            def.bias_pref = 0.0;
+            if(typeof def.activation !== 'undefined' && def.activation === 'relu') {
+              def.bias_pref = 0.1; // relus like a bit of positive bias to get gradients early
+              // otherwise it's technically possible that a relu unit will never turn on (by chance)
+              // and will never get any gradient and never contribute any computation. Dead relu.
+            }
+          }
+
+          new_defs.push(def);
+
+          if(typeof def.activation !== 'undefined') {
+            if(def.activation==='relu') { new_defs.push({type:'relu'}); }
+            else if (def.activation==='sigmoid') { new_defs.push({type:'sigmoid'}); }
+            else if (def.activation==='tanh') { new_defs.push({type:'tanh'}); }
+            else if (def.activation==='maxout') {
+              // create maxout activation, and pass along group size, if provided
+              var gs = def.group_size !== 'undefined' ? def.group_size : 2;
+              new_defs.push({type:'maxout', group_size:gs});
+            }
+            else { console.log('ERROR unsupported activation ' + def.activation); }
+          }
+          if(typeof def.drop_prob !== 'undefined' && def.type !== 'dropout') {
+            new_defs.push({type:'dropout', drop_prob: def.drop_prob});
+          }
+
+        }
+        return new_defs;
+      }
+      gen_defs = desugar(gen_defs);
+      dis_defs = desugar(dis_defs);
+      // create the layers
+      this.gen_layers = [];
+      this.dis_layers = [];
+      let def_layer_list = [{"defs": gen_defs, "layers": this.gen_layers},
+      {"defs": dis_defs, "layers": this.dis_layers}]
+      def_layer_list.forEach(item => {
+        let defs = item["defs"];
+        let layers = item["layers"];
+        for(var i=0;i<defs.length;i++) {
+          var def = defs[i];
+          if(i>0) {
+            var prev = layers[i-1];
+            def.in_sx = prev.out_sx;
+            def.in_sy = prev.out_sy;
+            def.in_depth = prev.out_depth;
+          }
+
+          switch(def.type) {
+            case 'fc': layers.push(new global.FullyConnLayer(def)); break;
+            case 'lrn': layers.push(new global.LocalResponseNormalizationLayer(def)); break;
+            case 'dropout': layers.push(new global.DropoutLayer(def)); break;
+            case 'input': layers.push(new global.InputLayer(def)); break;
+            case 'softmax': layers.push(new global.SoftmaxLayer(def)); break;
+            case 'regression': layers.push(new global.RegressionLayer(def)); break;
+            case 'conv': layers.push(new global.ConvLayer(def)); break;
+            case 'pool': layers.push(new global.PoolLayer(def)); break;
+            case 'relu': layers.push(new global.ReluLayer(def)); break;
+            case 'sigmoid': layers.push(new global.SigmoidLayer(def)); break;
+            case 'tanh': layers.push(new global.TanhLayer(def)); break;
+            case 'maxout': layers.push(new global.MaxoutLayer(def)); break;
+            case 'svm': layers.push(new global.SVMLayer(def)); break;
+            default: console.log('ERROR: UNRECOGNIZED LAYER TYPE: ' + def.type);
+          }
+        }
+      });
+      this.layers = this.gen_layers.concat(this.dis_layers);
+    },
+
+    // forward prop the network. 
+    // The trainer class passes is_training = true, but when this function is
+    // called from outside (not from the trainer), it defaults to prediction mode
+    forward: function(V, is_training, net_name) {
+      let layers;
+      if (net_name === 'gen') {
+        layers = this.gen_layers;
+      } else if(net_name === 'dis') {
+        layers = this.dis_layers;
+      } else if(net_name === 'both') {
+        layers = this.gen_layers.concat(this.dis_layers);
+      }
+      if(typeof(is_training) === 'undefined') is_training = false;
+      var act = layers[0].forward(V, is_training);
+      for(var i=1;i<layers.length;i++) {
+        act = layers[i].forward(act, is_training);
+      }
+      return act;
+    },
+
+    getCostLoss: function(V, y) {
+      this.forward(V, false);
+      var N = this.layers.length;
+      var loss = this.layers[N-1].backward(y);
+      return loss;
+    },
+    
+    // backprop: compute gradients wrt all parameters
+
+    backward: function(y, net_name) {
+      var N;
+      var loss; // last layer assumed to be loss layer
+      let layers;            
+      if(net_name === 'dis') {
+        layers = this.dis_layers;
+        N = layers.length;
+        loss = layers[N-1].backward(y); // last layer assumed to be loss layer
+      } else if(net_name === 'gen') {
+        layers = this.gen_layers.concat(this.dis_layers);
+        N = layers.length;        
+        loss = layers[N-1].backward(y, true);
+      }
+      for(var i=N-2;i>=0;i--) { // first layer assumed input
+        layers[i].backward();
+      }
+      return loss;
+    },
+
+    getParamsAndGrads: function(net_name) {
+      let layers;      
+      if (net_name === 'gen') {
+        layers = this.gen_layers;
+      } else if(net_name === 'dis') {
+        layers = this.dis_layers;
+      } else if(net_name === 'both') {
+        layers = this.gen_layers.concat(this.dis_layers);
+      }
+      // accumulate parameters and gradients for the entire network
+      var response = [];
+      for(var i=0;i<layers.length;i++) {
+        var layer_reponse = layers[i].getParamsAndGrads();
+        for(var j=0;j<layer_reponse.length;j++) {
+          response.push(layer_reponse[j]);
+        }
+      }
+      return response;
+    },
+    zero_grad: function(net_name) {
+      let layers;      
+      if (net_name === 'gen') {
+        layers = this.gen_layers;
+      } else if(net_name === 'dis') {
+        layers = this.dis_layers;
+      } else if(net_name === 'both') {
+        layers = this.gen_layers.concat(this.dis_layers);
+      }
+      // accumulate parameters and gradients for the entire network
+      for(var i=0;i<layers.length;i++) {
+        let fn = layers[i].zero_grad;
+        if (fn !== undefined) {
+          layers[i].zero_grad();
+        }
+      }
+    },
+    getPrediction: function() {
+      // this is a convenience function for returning the argmax
+      // prediction, assuming the last layer of the net is a softmax
+      var S = this.layers[this.layers.length-1];
+      assert(S.layer_type === 'softmax', 'getPrediction function assumes softmax as last layer of the net!');
+
+      var p = S.out_act.w;
+      var maxv = p[0];
+      var maxi = 0;
+      for(var i=1;i<p.length;i++) {
+        if(p[i] > maxv) { maxv = p[i]; maxi = i;}
+      }
+      return maxi; // return index of the class with highest class probability
+    },
+    toJSON: function() {
+      var json = {};
+      json.layers = [];
+      for(var i=0;i<this.layers.length;i++) {
+        json.layers.push(this.layers[i].toJSON());
+      }
+      return json;
+    },
+    fromJSON: function(json) {
+      this.layers = [];
+      for(var i=0;i<json.layers.length;i++) {
+        var Lj = json.layers[i]
+        var t = Lj.layer_type;
+        var L;
+        if(t==='input') { L = new global.InputLayer(); }
+        if(t==='relu') { L = new global.ReluLayer(); }
+        if(t==='sigmoid') { L = new global.SigmoidLayer(); }
+        if(t==='tanh') { L = new global.TanhLayer(); }
+        if(t==='dropout') { L = new global.DropoutLayer(); }
+        if(t==='conv') { L = new global.ConvLayer(); }
+        if(t==='pool') { L = new global.PoolLayer(); }
+        if(t==='lrn') { L = new global.LocalResponseNormalizationLayer(); }
+        if(t==='softmax') { L = new global.SoftmaxLayer(); }
+        if(t==='regression') { L = new global.RegressionLayer(); }
+        if(t==='fc') { L = new global.FullyConnLayer(); }
+        if(t==='maxout') { L = new global.MaxoutLayer(); }
+        if(t==='svm') { L = new global.SVMLayer(); }
+        L.fromJSON(Lj);
+        this.layers.push(L);
+      }
+    }
+  }
+
+  global.GAN = GAN;
   global.Net = Net;
 })(convnetjs);
 (function(global) {
@@ -1838,8 +2105,253 @@ var convnetjs = convnetjs || { REVISION: 'ALPHA' };
               loss: cost_loss + l1_decay_loss + l2_decay_loss}
     }
   }
+
+  var GANTrainer = function(gan, options) {
+    this.gan = gan;
+    var options = options || {};
+    this.learning_rate = typeof options.learning_rate !== 'undefined' ? options.learning_rate : 0.01;
+    this.l1_decay = typeof options.l1_decay !== 'undefined' ? options.l1_decay : 0.0;
+    this.l2_decay = typeof options.l2_decay !== 'undefined' ? options.l2_decay : 0.0;
+    this.batch_size = typeof options.batch_size !== 'undefined' ? options.batch_size : 1;
+    this.method = typeof options.method !== 'undefined' ? options.method : 'sgd'; // sgd/adagrad/adadelta/windowgrad/netsterov
+
+    this.g_momentum = typeof options.momentum !== 'undefined' ? options.momentum : 0.9;
+    this.g_ro = typeof options.ro !== 'undefined' ? options.ro : 0.95; // used in adadelta
+    this.g_eps = typeof options.eps !== 'undefined' ? options.eps : 1e-6; // used in adadelta
+
+    this.g_k = 0; // iteration counter
+    this.g_gsum = []; // last iteration gradients (used for momentum calculations)
+    this.g_xsum = []; // used in adadelta
+
+    this.d_momentum = typeof options.momentum !== 'undefined' ? options.momentum : 0.9;
+    this.d_ro = typeof options.ro !== 'undefined' ? options.ro : 0.95; // used in adadelta
+    this.d_eps = typeof options.eps !== 'undefined' ? options.eps : 1e-6; // used in adadelta
+
+    this.d_k = 0; // iteration counter
+    this.d_gsum = []; // last iteration gradients (used for momentum calculations)
+    this.d_xsum = []; // used in adadelta
+  }
+
+  GANTrainer.prototype = {
+    train_dis: function(x, y) {
+
+      var start = new Date().getTime();
+      this.gan.forward(x, true, 'dis'); // also set the flag that lets the generator know we're just training
+      var end = new Date().getTime();
+      var fwd_time = end - start;
+
+      var start = new Date().getTime();
+      var cost_loss = this.gan.backward(y, 'dis');
+      var l2_decay_loss = 0.0;
+      var l1_decay_loss = 0.0;
+      var end = new Date().getTime();
+      var bwd_time = end - start;
+      
+      this.d_k++;
+      if(this.d_k % this.batch_size === 0) {
+
+        let pglist = this.gan.getParamsAndGrads('dis');
+
+        // initialize lists for accumulators. Will only be done once on first iteration
+        if(this.d_gsum.length === 0 && (this.method !== 'sgd' || this.d_momentum > 0.0)) {
+          // only vanilla sgd doesnt need either lists
+          // momentum needs gsum
+          // adagrad needs gsum
+          // adadelta needs gsum and xsum
+          for(var i=0;i<pglist.length;i++) {
+            this.d_gsum.push(global.zeros(pglist[i].params.length));
+            if(this.method === 'adadelta') {
+              this.d_xsum.push(global.zeros(pglist[i].params.length));
+            } else {
+              this.d_xsum.push([]); // conserve memory
+            }
+          }
+        }
+
+        // perform an update for all sets of weights
+        for(var i=0;i<pglist.length;i++) {
+          var pg = pglist[i]; // param, gradient, other options in future (custom learning rate etc)
+          var p = pg.params;
+          var g = pg.grads;
+
+          // learning rate for some parameters.
+          var l2_decay_mul = typeof pg.l2_decay_mul !== 'undefined' ? pg.l2_decay_mul : 1.0;
+          var l1_decay_mul = typeof pg.l1_decay_mul !== 'undefined' ? pg.l1_decay_mul : 1.0;
+          var l2_decay = this.l2_decay * l2_decay_mul;
+          var l1_decay = this.l1_decay * l1_decay_mul;
+
+          var plen = p.length;
+          for(var j=0;j<plen;j++) {
+            l2_decay_loss += l2_decay*p[j]*p[j]/2; // accumulate weight decay loss
+            l1_decay_loss += l1_decay*Math.abs(p[j]);
+            var l1grad = l1_decay * (p[j] > 0 ? 1 : -1);
+            var l2grad = l2_decay * (p[j]);
+
+            var gij = (l2grad + l1grad + g[j]) / this.batch_size; // raw batch gradient
+
+            var gsumi = this.d_gsum[i];
+            var xsumi = this.d_xsum[i];
+            if(this.method === 'adagrad') {
+              // adagrad update
+              gsumi[j] = gsumi[j] + gij * gij;
+              var dx = - this.learning_rate / Math.sqrt(gsumi[j] + this.d_eps) * gij;
+              p[j] += dx;
+            } else if(this.method === 'windowgrad') {
+              // this is adagrad but with a moving window weighted average
+              // so the gradient is not accumulated over the entire history of the run. 
+              // it's also referred to as Idea #1 in Zeiler paper on Adadelta. Seems reasonable to me!
+              gsumi[j] = this.d_ro * gsumi[j] + (1-this.d_ro) * gij * gij;
+              var dx = - this.learning_rate / Math.sqrt(gsumi[j] + this.d_eps) * gij; // eps added for better conditioning
+              p[j] += dx;
+            } else if(this.method === 'adadelta') {
+              // assume adadelta if not sgd or adagrad
+              gsumi[j] = this.d_ro * gsumi[j] + (1-this.d_ro) * gij * gij;
+              var dx = - Math.sqrt((xsumi[j] + this.d_eps)/(gsumi[j] + this.d_eps)) * gij;
+              xsumi[j] = this.d_ro * xsumi[j] + (1-this.d_ro) * dx * dx; // yes, xsum lags behind gsum by 1.
+              p[j] += dx;
+            } else if(this.method === 'nesterov') {
+            	var dx = gsumi[j];
+            	gsumi[j] = gsumi[j] * this.d_momentum + this.learning_rate * gij;
+                dx = this.d_momentum * dx - (1.0 + this.d_momentum) * gsumi[j];
+                p[j] += dx;
+            } else {
+              // assume SGD
+              if(this.d_momentum > 0.0) {
+                // momentum update
+                var dx = this.d_momentum * gsumi[j] - this.learning_rate * gij; // step
+                gsumi[j] = dx; // back this up for next iteration of momentum
+                p[j] += dx; // apply corrected gradient
+              } else {
+                // vanilla sgd
+                p[j] +=  - this.learning_rate * gij;
+              }
+            }
+            g[j] = 0.0; // zero out gradient so that we can begin accumulating anew
+          }
+        }
+      }
+
+      // appending softmax_loss for backwards compatibility, but from now on we will always use cost_loss
+      // in future, TODO: have to completely redo the way loss is done around the network as currently 
+      // loss is a bit of a hack. Ideally, user should specify arbitrary number of loss functions on any layer
+      // and it should all be computed correctly and automatically. 
+      return {fwd_time: fwd_time, bwd_time: bwd_time, 
+              l2_decay_loss: l2_decay_loss, l1_decay_loss: l1_decay_loss,
+              cost_loss: cost_loss, softmax_loss: cost_loss, 
+              loss: cost_loss + l1_decay_loss + l2_decay_loss}
+    },
+
+    train_gen: function(x, y) {
+
+      var start = new Date().getTime();
+      this.gan.forward(x, true, 'both'); // also set the flag that lets the generator know we're just training
+      var end = new Date().getTime();
+      var fwd_time = end - start;
+
+      var start = new Date().getTime();
+      var cost_loss = this.gan.backward(y, 'gen');
+      var l2_decay_loss = 0.0;
+      var l1_decay_loss = 0.0;
+      var end = new Date().getTime();
+      var bwd_time = end - start;
+      
+      this.g_k++;
+      if(this.g_k % this.batch_size === 0) {
+
+        var pglist = this.gan.getParamsAndGrads('gen');
+        // initialize lists for accumulators. Will only be done once on first iteration
+        if(this.g_gsum.length === 0 && (this.method !== 'sgd' || this.g_momentum > 0.0)) {
+          // only vanilla sgd doesnt need either lists
+          // momentum needs gsum
+          // adagrad needs gsum
+          // adadelta needs gsum and xsum
+          for(var i=0;i<pglist.length;i++) {
+            this.g_gsum.push(global.zeros(pglist[i].params.length));
+            if(this.method === 'adadelta') {
+              this.g_xsum.push(global.zeros(pglist[i].params.length));
+            } else {
+              this.g_xsum.push([]); // conserve memory
+            }
+          }
+        }
+
+        // perform an update for all sets of weights
+        for(var i=0;i<pglist.length;i++) {
+          var pg = pglist[i]; // param, gradient, other options in future (custom learning rate etc)
+          var p = pg.params;
+          var g = pg.grads;
+
+          // learning rate for some parameters.
+          var l2_decay_mul = typeof pg.l2_decay_mul !== 'undefined' ? pg.l2_decay_mul : 1.0;
+          var l1_decay_mul = typeof pg.l1_decay_mul !== 'undefined' ? pg.l1_decay_mul : 1.0;
+          var l2_decay = this.l2_decay * l2_decay_mul;
+          var l1_decay = this.l1_decay * l1_decay_mul;
+
+          var plen = p.length;
+          for(var j=0;j<plen;j++) {
+            l2_decay_loss += l2_decay*p[j]*p[j]/2; // accumulate weight decay loss
+            l1_decay_loss += l1_decay*Math.abs(p[j]);
+            var l1grad = l1_decay * (p[j] > 0 ? 1 : -1);
+            var l2grad = l2_decay * (p[j]);
+
+            var gij = (l2grad + l1grad + g[j]) / this.batch_size; // raw batch gradient
+
+            var gsumi = this.g_gsum[i];
+            var xsumi = this.g_xsum[i];
+            if(this.method === 'adagrad') {
+              // adagrad update
+              gsumi[j] = gsumi[j] + gij * gij;
+              var dx = - this.learning_rate / Math.sqrt(gsumi[j] + this.g_eps) * gij;
+              p[j] += dx;
+            } else if(this.method === 'windowgrad') {
+              // this is adagrad but with a moving window weighted average
+              // so the gradient is not accumulated over the entire history of the run. 
+              // it's also referred to as Idea #1 in Zeiler paper on Adadelta. Seems reasonable to me!
+              gsumi[j] = this.g_ro * gsumi[j] + (1-this.g_ro) * gij * gij;
+              var dx = - this.learning_rate / Math.sqrt(gsumi[j] + this.g_eps) * gij; // eps added for better conditioning
+              p[j] += dx;
+            } else if(this.method === 'adadelta') {
+              // assume adadelta if not sgd or adagrad
+              gsumi[j] = this.g_ro * gsumi[j] + (1-this.g_ro) * gij * gij;
+              var dx = - Math.sqrt((xsumi[j] + this.g_eps)/(gsumi[j] + this.g_eps)) * gij;
+              xsumi[j] = this.g_ro * xsumi[j] + (1-this.g_ro) * dx * dx; // yes, xsum lags behind gsum by 1.
+              p[j] += dx;
+            } else if(this.method === 'nesterov') {
+            	var dx = gsumi[j];
+            	gsumi[j] = gsumi[j] * this.g_momentum + this.learning_rate * gij;
+                dx = this.g_momentum * dx - (1.0 + this.g_momentum) * gsumi[j];
+                p[j] += dx;
+            } else {
+              // assume SGD
+              if(this.g_momentum > 0.0) {
+                // momentum update
+                var dx = this.g_momentum * gsumi[j] - this.learning_rate * gij; // step
+                gsumi[j] = dx; // back this up for next iteration of momentum
+                p[j] += dx; // apply corrected gradient
+              } else {
+                // vanilla sgd
+                p[j] +=  - this.learning_rate * gij;
+              }
+            }
+            g[j] = 0.0; // zero out gradient so that we can begin accumulating anew
+          }
+        }
+        //this.gan.zero_grad('dis');        
+      }
+
+      // appending softmax_loss for backwards compatibility, but from now on we will always use cost_loss
+      // in future, TODO: have to completely redo the way loss is done around the network as currently 
+      // loss is a bit of a hack. Ideally, user should specify arbitrary number of loss functions on any layer
+      // and it should all be computed correctly and automatically. 
+      return {fwd_time: fwd_time, bwd_time: bwd_time, 
+              l2_decay_loss: l2_decay_loss, l1_decay_loss: l1_decay_loss,
+              cost_loss: cost_loss, softmax_loss: cost_loss, 
+              loss: cost_loss + l1_decay_loss + l2_decay_loss}
+    }
+  }
   
   global.Trainer = Trainer;
+  global.GANTrainer = GANTrainer;
   global.SGDTrainer = Trainer; // backwards compatibility
 })(convnetjs);
 
@@ -1850,7 +2362,9 @@ var convnetjs = convnetjs || { REVISION: 'ALPHA' };
   var randf = global.randf;
   var randi = global.randi;
   var Net = global.Net;
+  var GAN = global.GAN;  
   var Trainer = global.Trainer;
+  var GANTrainer = global.GANTrainer;
   var maxmin = global.maxmin;
   var randperm = global.randperm;
   var weightedSample = global.weightedSample;
